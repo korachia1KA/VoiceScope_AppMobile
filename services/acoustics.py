@@ -1,6 +1,8 @@
 """Digital signal measurements. No acoustic SPL calibration is implied."""
 import io
 import math
+import shutil
+import subprocess
 import numpy as np
 import soundfile as sf
 try:
@@ -35,6 +37,32 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_SECONDS = 300
 
 
+def _decode_with_ffmpeg(raw):
+    """Fallback for m4a/AAC/mp4 etc. that libsndfile cannot read.
+
+    Returns mono float32 samples at SR, or None when ffmpeg is unavailable
+    or cannot decode the data. Nothing is written to disk.
+    """
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return None
+    try:
+        proc = subprocess.run(
+            [exe, "-v", "error", "-i", "pipe:0", "-t", str(MAX_SECONDS + 1),
+             "-ac", "1", "-ar", str(SR), "-f", "f32le", "pipe:1"],
+            input=raw, capture_output=True, timeout=120,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return np.frombuffer(proc.stdout, dtype="<f4").copy()
+
+
 def read_wav(raw):
     if not raw:
         raise ValueError("Fichier audio vide.")
@@ -51,7 +79,12 @@ def read_wav(raw):
             data = audio.read(dtype="float32", always_2d=True).mean(axis=1)
             rate = audio.samplerate
     except (RuntimeError, sf.LibsndfileError) as exc:
-        raise ValueError("Format audio illisible ou incompatible.") from exc
+        data = _decode_with_ffmpeg(raw)
+        if data is None or len(data) == 0:
+            raise ValueError("Format audio illisible ou incompatible.") from exc
+        if len(data) > MAX_SECONDS * SR:
+            raise ValueError("Audio limité à 5 minutes et 8 canaux.") from exc
+        rate = SR
     if not np.isfinite(data).all() or np.max(np.abs(data)) > 1.001:
         raise ValueError("Échantillons invalides : valeurs finies dans [-1, 1] requises.")
     if rate != SR:

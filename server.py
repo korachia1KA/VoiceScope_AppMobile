@@ -1,4 +1,4 @@
-"""VoiceScope AI: local FastAPI service. Run one worker on loopback only."""
+"""VoiceScope AI: local FastAPI service for the mobile app. Run one worker on a trusted private network."""
 import importlib.util
 import json
 import logging
@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Depends
 from fastapi.responses import Response
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import ValidationError
 from schemas import AnalysisOptions, AnalysisResult, Profile
@@ -29,17 +28,22 @@ result_lock = threading.RLock()
 work_lock = threading.Lock()
 log = logging.getLogger("voicescope")
 
+# IP address(es) of this PC on the Wi-Fi network (see `ipconfig`), comma-separated.
+# Example (PowerShell): $env:VOICESCOPE_ALLOWED_HOSTS = "192.168.1.117"
+LAN_HOSTS = [h.strip() for h in os.getenv("VOICESCOPE_ALLOWED_HOSTS", "").split(",") if h.strip()]
+
 @asynccontextmanager
 async def lifespan(app):
     store.load()
     yield
 
 app = FastAPI(title="VoiceScope AI",version="2.0.0",lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware,allowed_hosts=["localhost","127.0.0.1","testserver"])
+app.add_middleware(TrustedHostMiddleware,allowed_hosts=["localhost","127.0.0.1","testserver",*LAN_HOSTS])
 app.add_middleware(BodyLimitMiddleware,max_bytes=MAX_BYTES+65536)
 
 @app.middleware("http")
 async def local_security(request, call_next):
+    # The mobile app sends no Origin header; browser origins stay restricted to localhost.
     origin = request.headers.get("origin")
     if origin and origin not in ("http://localhost:8000","http://127.0.0.1:8000","http://localhost:5173","http://127.0.0.1:5173"):
         return Response("Origine non autorisée",status_code=403)
@@ -179,7 +183,3 @@ def export_result(key: str,format: Literal["json","csv","txt","pdf"]):
     except ImportError as exc:
         raise HTTPException(503,"Dépendances PDF manquantes.") from exc
     return Response(content,media_type=mime,headers={"Content-Disposition":f'attachment; filename="voicescope-{key}.{format}"'})
-
-DIST = BASE/"frontend"/"dist"
-if DIST.exists():
-    app.mount("/",StaticFiles(directory=DIST,html=True),name="ui")
